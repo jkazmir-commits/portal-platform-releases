@@ -1,0 +1,26 @@
+name: Verify running WordPress DEV version
+on:
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/check-dev-deployment.yml'
+      - '.github/scripts/check_dev_deployment.py'
+      - '.github/tests/test_check_dev_deployment.py'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Offline safety tests
+        run: python3 -m unittest discover -s .github/tests -p 'test_check_dev_deployment.py' -v
+      - name: Compare public release to running DEV
+        run: python3 .github/scripts/check_dev_deployment.py
