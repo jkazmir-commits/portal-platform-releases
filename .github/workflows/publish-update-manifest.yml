@@ -23,8 +23,8 @@ jobs:
       - name: Resolve the approved release tag
         shell: bash
         env:
-          GH_TOKEN: \${{ github.token }}
-          RELEASE_TAG: \${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           if [ -n "$RELEASE_TAG" ]; then
@@ -37,7 +37,7 @@ jobs:
       - name: Download and independently inspect actual release asset
         shell: bash
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p dist
