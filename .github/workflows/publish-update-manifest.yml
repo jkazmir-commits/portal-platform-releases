@@ -1,0 +1,114 @@
+name: Verify release ZIP and publish latest.json
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-update-manifest.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: portal-platform-update-manifest
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'jkazmir-commits/portal-platform-releases'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout public distribution
+        uses: actions/checkout@v4
+      - name: Resolve the approved release tag
+        shell: bash
+        env:
+          GH_TOKEN: \${{ github.token }}
+          RELEASE_TAG: \${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASE_TAG" ]; then
+            version="$RELEASE_TAG"
+          else
+            version="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' | grep -E '^0[.]8[.]0-dev[0-9]+$' | sort -V | tail -n 1)"
+          fi
+          [[ "$version" =~ ^0[.]8[.]0-dev[0-9]+$ ]] || { echo "No approved DEV release found"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Download and independently inspect actual release asset
+        shell: bash
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern "portal-platform-$VERSION.zip" --dir dist
+          unzip -t "dist/portal-platform-$VERSION.zip"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import os
+          import re
+          import zipfile
+
+          version = os.environ["VERSION"]
+          archive = Path("dist") / ("portal-platform-" + version + ".zip")
+          with zipfile.ZipFile(archive) as handle:
+              members = handle.namelist()
+              if not members or len(members) != len(set(members)):
+                  raise SystemExit("Empty or repeated ZIP members")
+              if any(
+                  not member.startswith("portal-platform/")
+                  or member.endswith("/")
+                  or any(part in ("", ".", "..") for part in member.split("/"))
+                  for member in members
+              ):
+                  raise SystemExit("Unexpected ZIP structure")
+              plugin = handle.read("portal-platform/portal-platform.php").decode("utf-8")
+              if not re.search(r"(?m)^\s*\*\s*Version:\s*" + re.escape(version) + r"\s*$", plugin):
+                  raise SystemExit("ZIP plugin version does not match release tag")
+              if "Update URI: https://jpcontrol.cz/portal-platform" not in plugin:
+                  raise SystemExit("ZIP missing expected WordPress Update URI")
+              if "portal-platform/src/Runtime/DevPluginUpdater.php" not in members:
+                  raise SystemExit("ZIP missing DEV update verifier")
+
+          current = Path("latest.json")
+          if current.is_file():
+              old = json.loads(current.read_text(encoding="utf-8")).get("version", "")
+              if re.fullmatch(r"0[.]8[.]0-dev[0-9]+", old):
+                  if int(old.split("dev")[-1]) >= int(version.split("dev")[-1]):
+                      print("No newer release to publish")
+                      raise SystemExit(0)
+
+          url = (
+              "https://github.com/" + os.environ["GITHUB_REPOSITORY"]
+              + "/releases/download/" + version
+              + "/portal-platform-" + version + ".zip"
+          )
+          metadata = {
+              "version": version,
+              "package": url,
+              "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+          }
+          Path("dist/latest.json").write_text(
+              json.dumps(metadata, sort_keys=True, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print("Verified and prepared", version, metadata["sha256"])
+          PY
+      - name: Publish monotonic latest.json for WordPress DEV
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f dist/latest.json ]; then
+            echo "No metadata update needed"
+            exit 0
+          fi
+          cp dist/latest.json latest.json
+          git add latest.json
+          if git diff --cached --quiet; then
+            echo "Metadata already up to date"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Publish WordPress DEV metadata for $VERSION"
+          git push origin HEAD:main
